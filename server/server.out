@@ -1,0 +1,4 @@
+Nov 08 20:19:48.881 [notice] Tor 0.4.8.13 running on Darwin with Libevent 2.1.12-stable, OpenSSL 3.4.0, Zlib 1.2.12, Liblzma N/A, Libzstd N/A and Unknown N/A as libc.
+Nov 08 20:19:48.881 [notice] Tor can't help you if you use it wrong! Learn how to be safe at https://support.torproject.org/faq/staying-anonymous/
+Nov 08 20:19:48.882 [warn] Unable to open configuration file "/Users/sonya/Library/CloudStorage/OneDrive-Stanford/2024-25/CS356/Project/SnowflakeLocal/snowflake/server/torrc-server".
+Nov 08 20:19:48.882 [err] Reading config failed--see warnings above.

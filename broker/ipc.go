@@ -237,10 +237,15 @@ func (i *IPC) matchSnowflake(natType string) *Snowflake {
 		return heap.Pop(i.ctx.restrictedSnowflakes).(*Snowflake)
 	}
 
-	if i.ctx.snowflakes.Len() > 0 {
-		return heap.Pop(i.ctx.snowflakes).(*Snowflake)
+	if i.ctx.restrictedSnowflakes.Len() > 0 {
+		log.Println("matched restricted snowflake")
+		return heap.Pop(i.ctx.restrictedSnowflakes).(*Snowflake)
 	}
 
+	// if i.ctx.snowflakes.Len() > 0 {
+	// 	return heap.Pop(i.ctx.snowflakes).(*Snowflake)
+	// }
+	log.Println("unable to match snowflake")
 	return nil
 }
 
