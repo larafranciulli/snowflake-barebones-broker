@@ -134,6 +134,13 @@ func waitForClientMatch(ctx context.Context) (string, ClientOffer, error) {
 	return clientID, offer, nil
 }
 
+// Helper function to remove proxy from Redis
+func cleanupProxy(ctx context.Context, proxyID string) {
+	// Remove proxy hash and waiting list entry
+	redisClient.Del(ctx, fmt.Sprintf("proxy:%s", proxyID))
+	redisClient.LRem(ctx, "available_proxies", 0, proxyID)
+}
+
 func handleProxyPolls(ctx context.Context, arg messages.Arg, response *[]byte) error {
 	log.Printf("Right before decoding!")
 	log.Printf("Arg body: %v", arg.Body)
@@ -164,18 +171,19 @@ func handleProxyPolls(ctx context.Context, arg messages.Arg, response *[]byte) e
 	// If no client matched, return failure
 	if clientID == "" {
 		log.Printf("No client offer found for proxy %s. Removing proxy from Redis.", sid)
-		// Clean up: Remove proxy from Redis
-		err := redisClient.Del(ctx, fmt.Sprintf("proxy:%s", sid)).Err()
-		if err != nil {
-			log.Printf("Error deleting proxy from Redis: %v", err)
-		}
+		// // Clean up: Remove proxy from Redis
+		// err := redisClient.Del(ctx, fmt.Sprintf("proxy:%s", sid)).Err()
+		// if err != nil {
+		// 	log.Printf("Error deleting proxy from Redis: %v", err)
+		// }
 
-		// Clean up: Remove proxy from the waiting list
-		err = redisClient.LRem(ctx, "waiting_proxies", 0, proxyID).Err()
-		if err != nil {
-			log.Printf("Error removing proxy from waiting list: %v", err)
-		}
+		// // Clean up: Remove proxy from the waiting list
+		// err = redisClient.LRem(ctx, "waiting_proxies", 0, proxyID).Err()
+		// if err != nil {
+		// 	log.Printf("Error removing proxy from waiting list: %v", err)
+		// }
 
+		cleanupProxy(ctx, proxyID)
 		// Encode the response
 		b, err := messages.EncodePollResponse("", false, "")
 		if err != nil {
@@ -186,10 +194,7 @@ func handleProxyPolls(ctx context.Context, arg messages.Arg, response *[]byte) e
 	}
 
 	// Clean up: Remove proxy from the waiting list if matched
-	err = redisClient.LRem(ctx, "waiting_proxies", 0, proxyID).Err()
-	if err != nil {
-		log.Printf("Error removing proxy from waiting list: %v", err)
-	}
+	cleanupProxy(ctx, proxyID)
 
 	var relayURL = ""
 
