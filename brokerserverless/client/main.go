@@ -12,6 +12,7 @@ import (
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/go-redis/redis/v8"
+	"github.com/google/uuid"
 	"gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/snowflake/v2/common/messages"
 )
 
@@ -24,7 +25,6 @@ type ClientOffer struct {
 
 var redisClient *redis.Client
 
-const proxyMatchTimeout = time.Second * 5
 const proxyAnswerTimeout = time.Second * 5
 
 func init() {
@@ -63,7 +63,9 @@ func clientHandler(ctx context.Context, request events.APIGatewayProxyRequest) (
 	log.Printf("Body in client handler: %s", body)
 	// TODO-LATER: use same strategy in util.GetClientIp(r) to get the remote address
 	remoteAddr := request.RequestContext.Identity.SourceIP
-	clientID := remoteAddr
+	// Make client ID a random string for now
+	clientID := uuid.New().String()
+	log.Printf("Generated Client ID: %s", clientID)
 
 	arg := messages.Arg{
 		Body:             []byte(body),
@@ -108,6 +110,27 @@ func waitForProxyAnswer(ctx context.Context, clientID string) (string, error) {
 	return answer, nil
 }
 
+// Update the proxy database with the matched client
+func updateProxyWithMatchedClient(ctx context.Context, proxyID, clientID string, clientOffer ClientOffer) error {
+	// Assuming you're using a Redis hash to store the matched client
+	clientOfferJSON, err := json.Marshal(clientOffer)
+	if err != nil {
+		return fmt.Errorf("failed to marshal client offer: %v", err)
+	}
+
+	// Update the database for this proxyId
+	err = redisClient.HMSet(ctx, fmt.Sprintf("proxy:%s", proxyID), map[string]interface{}{
+		"clientId":    clientID,
+		"clientOffer": clientOfferJSON,
+	}).Err()
+	if err != nil {
+		return fmt.Errorf("failed to update matched client in Redis: %v", err)
+	}
+	log.Printf("Matched proxy %s with client %s", proxyID, clientID)
+
+	return nil
+}
+
 func handleClientOffer(ctx context.Context, arg messages.Arg, clientID string, response *[]byte) error {
 	req, err := messages.DecodeClientPollRequest(arg.Body)
 	if err != nil {
@@ -120,7 +143,8 @@ func handleClientOffer(ctx context.Context, arg messages.Arg, clientID string, r
 	}
 
 	// Immediately check for an available proxy using LPop
-	proxyResult, err := redisClient.LPop(ctx, "available_proxies").Result()
+	// TO-DO: two queues for different restricted
+	proxyResult, err := redisClient.LPop(ctx, "waiting_proxies").Result()
 	if err != nil {
 		if err == redis.Nil {
 			// No proxy available
@@ -132,17 +156,7 @@ func handleClientOffer(ctx context.Context, arg messages.Arg, clientID string, r
 	proxyID := proxyResult
 	log.Printf("Assigned proxy ID: %s for client %s", proxyID, clientID)
 
-	// Store client offer in Redis for the proxy to retrieve
-	clientOfferJSON, err := json.Marshal(offer)
-	if err != nil {
-		return fmt.Errorf("failed to marshal client offer: %v", err)
-	}
-	err = redisClient.HSet(ctx, fmt.Sprintf("client:%s", clientID),
-		"offer", clientOfferJSON,
-		"status", "waiting_for_proxy").Err()
-	if err != nil {
-		return fmt.Errorf("failed to store client offer in Redis: %v", err)
-	}
+	updateProxyWithMatchedClient(ctx, proxyID, clientID, *offer)
 
 	// Wait for proxy answer with a blocking call
 	answer, err := waitForProxyAnswer(ctx, clientID)

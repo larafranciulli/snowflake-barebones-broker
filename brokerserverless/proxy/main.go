@@ -95,6 +95,12 @@ func addProxyToRedis(ctx context.Context, proxyID, natType string) error {
 		return fmt.Errorf("failed to add proxy to Redis: %v", err)
 	}
 
+	// Set the expiration time for the proxy data to 5 minutes (300 seconds)
+	err = redisClient.Expire(ctx, fmt.Sprintf("proxy:%s", proxyID), 5*time.Minute).Err()
+	if err != nil {
+		return fmt.Errorf("failed to set expiration for proxy data: %v", err)
+	}
+
 	// Add the proxyID to a Redis list of proxies waiting for a match
 	err = redisClient.RPush(ctx, "waiting_proxies", proxyID).Err()
 	if err != nil {
@@ -103,47 +109,86 @@ func addProxyToRedis(ctx context.Context, proxyID, natType string) error {
 	return nil
 }
 
-func waitForClientMatch(ctx context.Context) (string, ClientOffer, error) {
-	// BLPop blocks until a client is available, returns a slice with 2 elements:
-	// [0] is the list name ("waiting_clients"), [1] is the clientId (remoteAddr)
-	result, err := redisClient.BLPop(ctx, 5*time.Second, "waiting_clients").Result()
-	if err != nil {
-		if err == redis.Nil {
-			// Timeout without a match
-			return "", ClientOffer{}, nil
+// func waitForClientMatch(ctx context.Context) (string, ClientOffer, error) {
+// 	// BLPop blocks until a client is available, returns a slice with 2 elements:
+// 	// [0] is the list name ("waiting_clients"), [1] is the clientId (remoteAddr)
+// 	result, err := redisClient.BLPop(ctx, 5*time.Second, "waiting_clients").Result()
+// 	if err != nil {
+// 		if err == redis.Nil {
+// 			// Timeout without a match
+// 			return "", ClientOffer{}, nil
+// 		}
+// 		return "", ClientOffer{}, fmt.Errorf("failed to perform BLPop: %v", err)
+// 	}
+
+// 	// The clientID is the second element in the slice
+// 	clientID := result[1]
+
+// 	// Use the clientId (remoteAddr) to retrieve the offer associated with the client
+// 	offerJSON, err := redisClient.HGet(ctx, fmt.Sprintf("client:%s", clientID), "offer").Result()
+// 	if err != nil {
+// 		return "", ClientOffer{}, fmt.Errorf("failed to get client offer from Redis: %v", err)
+// 	}
+
+// 	var offer ClientOffer
+// 	err = json.Unmarshal([]byte(offerJSON), &offer)
+// 	if err != nil {
+// 		return "", ClientOffer{}, fmt.Errorf("failed to unmarshal client offer: %v", err)
+// 	}
+
+// 	// Returning the clientId and the associated offer
+// 	return clientID, offer, nil
+// }
+
+// ProxyPolls waits for the matched client ID and client offer in the database
+func waitForMatchedClient(ctx context.Context, proxyID string) (string, ClientOffer, error) {
+	// Polling loop to check if clientId and clientOffer have been set
+	var clientOffer ClientOffer
+
+	// Timeout after 5 seconds to avoid hanging indefinitely
+	timeout := time.After(5 * time.Second)
+	ticker := time.NewTicker(500 * time.Millisecond)
+
+	for {
+		select {
+		case <-timeout:
+			// Return empty clientID and nil clientOffer if timeout is reached
+			return "", clientOffer, nil
+		case <-ticker.C:
+			// Get the current clientId and clientOffer from the Redis hash
+			clientData, err := redisClient.HGetAll(ctx, fmt.Sprintf("proxy:%s", proxyID)).Result()
+			if err != nil {
+				return "", clientOffer, fmt.Errorf("failed to retrieve proxy data: %v", err)
+			}
+
+			// If both clientId and clientOffer are populated, break the loop
+			if clientID, ok := clientData["clientId"]; ok && clientID != "" {
+				clientOfferJSON, err := redisClient.HGet(ctx, fmt.Sprintf("proxy:%s", proxyID), "clientOffer").Result()
+				if err != nil {
+					return "", clientOffer, fmt.Errorf("failed to retrieve client offer: %v", err)
+				}
+
+				err = json.Unmarshal([]byte(clientOfferJSON), &clientOffer)
+				if err != nil {
+					return "", clientOffer, fmt.Errorf("failed to unmarshal client offer: %v", err)
+				}
+
+				// Successfully found matched client and offer
+				return clientID, clientOffer, nil
+			}
 		}
-		return "", ClientOffer{}, fmt.Errorf("failed to perform BLPop: %v", err)
 	}
-
-	// The clientID is the second element in the slice
-	clientID := result[1]
-
-	// Use the clientId (remoteAddr) to retrieve the offer associated with the client
-	offerJSON, err := redisClient.Get(ctx, fmt.Sprintf("client:%s:offer", clientID)).Result()
-	if err != nil {
-		return "", ClientOffer{}, fmt.Errorf("failed to get client offer from Redis: %v", err)
-	}
-
-	var offer ClientOffer
-	err = json.Unmarshal([]byte(offerJSON), &offer)
-	if err != nil {
-		return "", ClientOffer{}, fmt.Errorf("failed to unmarshal client offer: %v", err)
-	}
-
-	// Returning the clientId and the associated offer
-	return clientID, offer, nil
 }
 
 // Helper function to remove proxy from Redis
 func cleanupProxy(ctx context.Context, proxyID string) {
 	// Remove proxy hash and waiting list entry
 	redisClient.Del(ctx, fmt.Sprintf("proxy:%s", proxyID))
-	redisClient.LRem(ctx, "available_proxies", 0, proxyID)
+	redisClient.LRem(ctx, "waiting_proxies", 0, proxyID)
+	log.Printf("Removed proxy %s from Redis", proxyID)
 }
 
 func handleProxyPolls(ctx context.Context, arg messages.Arg, response *[]byte) error {
-	log.Printf("Right before decoding!")
-	log.Printf("Arg body: %v", arg.Body)
 	sid, proxyType, natType, clients, relayPattern, relayPatternSupported, err := messages.DecodeProxyPollRequestWithRelayPrefix(arg.Body)
 	if err != nil {
 		return err
@@ -163,7 +208,7 @@ func handleProxyPolls(ctx context.Context, arg messages.Arg, response *[]byte) e
 	}
 
 	// Wait for client match (block for up to 5 seconds)
-	clientID, offer, err := waitForClientMatch(ctx)
+	clientID, offer, err := waitForMatchedClient(ctx, proxyID)
 	if err != nil {
 		return fmt.Errorf("error waiting for client match: %v", err)
 	}
@@ -171,17 +216,6 @@ func handleProxyPolls(ctx context.Context, arg messages.Arg, response *[]byte) e
 	// If no client matched, return failure
 	if clientID == "" {
 		log.Printf("No client offer found for proxy %s. Removing proxy from Redis.", sid)
-		// // Clean up: Remove proxy from Redis
-		// err := redisClient.Del(ctx, fmt.Sprintf("proxy:%s", sid)).Err()
-		// if err != nil {
-		// 	log.Printf("Error deleting proxy from Redis: %v", err)
-		// }
-
-		// // Clean up: Remove proxy from the waiting list
-		// err = redisClient.LRem(ctx, "waiting_proxies", 0, proxyID).Err()
-		// if err != nil {
-		// 	log.Printf("Error removing proxy from waiting list: %v", err)
-		// }
 
 		cleanupProxy(ctx, proxyID)
 		// Encode the response
@@ -193,8 +227,10 @@ func handleProxyPolls(ctx context.Context, arg messages.Arg, response *[]byte) e
 		return nil
 	}
 
+	log.Printf("Matched client %s with proxy %s", clientID, proxyID)
+
 	// Clean up: Remove proxy from the waiting list if matched
-	cleanupProxy(ctx, proxyID)
+	redisClient.LRem(ctx, "waiting_proxies", 0, proxyID)
 
 	var relayURL = ""
 
