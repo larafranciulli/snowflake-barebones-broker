@@ -1,0 +1,289 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Resources:
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: SnowflakeBrokerAPI
+      ProtocolType: HTTP
+  
+  ApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/http-api/${HttpApi}"
+  
+  HttpApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: "$default"
+      AutoDeploy: true
+      AccessLogSettings:
+        DestinationArn: !GetAtt ApiLogGroup.Arn
+        Format: '{"requestId":"$context.requestId","ip":"$context.identity.sourceIp","caller":"$context.identity.caller","user":"$context.identity.user","requestTime":"$context.requestTime","httpMethod":"$context.httpMethod","routeKey":"$context.routeKey","status":"$context.status","protocol":"$context.protocol","responseLength":"$context.responseLength"}'
+
+  RedisSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security group for Redis cluster"
+      VpcId: !Ref DefaultVpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 6379
+          ToPort: 6379
+          SourceSecurityGroupId: !GetAtt LambdaSecurityGroup.GroupId
+
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security group for Lambda functions"
+      VpcId: !Ref DefaultVpcId
+  
+  RedisSubnetGroup:
+    Type: AWS::ElastiCache::SubnetGroup
+    Properties:
+      Description: "Subnet group for Redis cluster"
+      SubnetIds:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+
+  RedisCluster:
+    Type: AWS::ElastiCache::CacheCluster
+    Properties:
+      Engine: redis
+      CacheNodeType: cache.t2.micro
+      NumCacheNodes: 1
+      VpcSecurityGroupIds:
+        - !GetAtt RedisSecurityGroup.GroupId 
+      CacheSubnetGroupName: !Ref RedisSubnetGroup
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogGroups
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DescribeSubnets
+                  - ec2:DeleteNetworkInterface
+                  - ec2:AssignPrivateIpAddresses
+                  - ec2:UnassignPrivateIpAddresses
+                  - ec2:DescribeVpcs
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeSecurityGroups
+                  - firehose:ListDeliveryStreams
+                  - kms:DescribeKey
+                  - kms:ListAliases
+                  - kms:ListKeys
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:GetMetricData
+                  - elasticache:*
+                  - s3:ListAllMyBuckets
+                  - outposts:ListOutposts
+                  - sns:ListTopics
+                  - application-autoscaling:DescribeScalableTargets
+                  - application-autoscaling:DescribeScheduledActions
+                  - application-autoscaling:DescribeScalingPolicies
+                  - application-autoscaling:DescribeScalingActivities
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - iam:CreateServiceLinkedRole
+                Resource: >-
+                  arn:aws:iam::*:role/aws-service-role/elasticache.amazonaws.com/AWSServiceRoleForElastiCache
+                Condition:
+                  StringLike:
+                    iam:AWSServiceName: elasticache.amazonaws.com
+
+              - Effect: Allow
+                Action:
+                  - ec2:CreateVpcEndpoint
+                Resource: arn:aws:ec2:*:*:vpc-endpoint/*
+                Condition:
+                  StringLike:
+                    ec2:VpceServiceName: com.amazonaws.elasticache.serverless.*
+              - Effect: Allow
+                Action:
+                  - ec2:CreateVpcEndpoint
+                NotResource: arn:aws:ec2:*:*:vpc-endpoint/*
+              - Effect: Allow
+                Action:
+                  - ec2:CreateTags
+                Resource: arn:aws:ec2:*:*:vpc-endpoint/*
+                Condition:
+                  StringEquals:
+                    ec2:CreateAction: CreateVpcEndpoint
+                    aws:RequestTag/AmazonElastiCacheManaged: 'true'
+
+  ProxyFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: proxy
+      Handler: main
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: provided.al2023
+      Architectures:
+        - arm64
+      Timeout: 15
+      Code:
+        S3Bucket: snowflake-serverless-broker-lambda-code
+        S3Key: proxy.zip
+      Environment:
+        Variables:
+          REDIS_ADDRESS: !Sub "${RedisCluster.RedisEndpoint.Address}:6379"
+      VpcConfig:
+        SubnetIds: 
+          - !Ref PublicSubnet1
+          - !Ref PublicSubnet2
+        SecurityGroupIds:
+          - !GetAtt LambdaSecurityGroup.GroupId
+
+  ClientFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: client
+      Handler: main
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: provided.al2023
+      Architectures:
+        - arm64
+      Timeout: 15
+      Code:
+        S3Bucket: snowflake-serverless-broker-lambda-code
+        S3Key: client.zip
+      Environment:
+        Variables:
+          REDIS_ADDRESS: !Sub "${RedisCluster.RedisEndpoint.Address}:6379"
+      VpcConfig:
+        SubnetIds: 
+          - !Ref PublicSubnet1
+          - !Ref PublicSubnet2
+        SecurityGroupIds:
+          - !GetAtt LambdaSecurityGroup.GroupId
+
+  AnswerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: answer
+      Handler: main
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: provided.al2023
+      Architectures:
+        - arm64
+      Timeout: 15
+      Code:
+        S3Bucket: snowflake-serverless-broker-lambda-code
+        S3Key: answer.zip
+      Environment:
+        Variables:
+          REDIS_ADDRESS: !Sub "${RedisCluster.RedisEndpoint.Address}:6379"
+      VpcConfig:
+        SubnetIds: 
+          - !Ref PublicSubnet1
+          - !Ref PublicSubnet2
+        SecurityGroupIds:
+          - !GetAtt LambdaSecurityGroup.GroupId
+  
+  ProxyLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt ProxyFunction.Arn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*"
+
+  ClientLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt ClientFunction.Arn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*"
+
+  AnswerLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt AnswerFunction.Arn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*"
+
+  ProxyIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationMethod: POST
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt ProxyFunction.Arn
+      PayloadFormatVersion: "2.0"
+
+  ClientIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationMethod: POST
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt ClientFunction.Arn
+      PayloadFormatVersion: "2.0"
+
+  AnswerIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationMethod: ANY
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt AnswerFunction.Arn
+      PayloadFormatVersion: "2.0"
+
+  ProxyRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /proxy"
+      Target: !Sub "integrations/${ProxyIntegration}"
+
+  ClientRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /client"
+      Target: !Sub "integrations/${ClientIntegration}"
+
+  AnswerRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "ANY /answer"
+      Target: !Sub "integrations/${AnswerIntegration}"
+
+Parameters:
+  DefaultVpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: "Fetches and applies the default AWS VPC ID Automatically!"
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet::Id
+    Description: "The first public subnet."
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet::Id
+    Description: "The second public subnet."
+
+Outputs:
+  ApiGatewayEndpoint:
+    Description: "The URL of the API Gateway endpoint"
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com"

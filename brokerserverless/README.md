@@ -1,0 +1,2 @@
+# Serverless Broker
+This folder contains the code for an AWS-based serverless broker. The template.yaml file creates the AWS resources. Each folder (proxy, client, answer) contains the lambda function code for the HTTP endpoints. 

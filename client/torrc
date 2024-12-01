@@ -3,4 +3,4 @@ DataDirectory datadir
 
 ClientTransportPlugin snowflake exec ./client 
 
-Bridge snowflake 192.0.2.3:1 url=https://54tmxg61sd.execute-api.us-east-1.amazonaws.com
+Bridge snowflake 192.0.2.3:1 url=https://[INSERT_API_GATEWAY_ID].execute-api.[INSERT_AWS_REGION].amazonaws.com
