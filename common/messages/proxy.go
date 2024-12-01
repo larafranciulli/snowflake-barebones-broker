@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 
 	"gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/snowflake/v2/common/nat"
@@ -129,21 +130,30 @@ func DecodeProxyPollRequest(data []byte) (sid string, proxyType string, natType 
 // and an error if it failed
 func DecodeProxyPollRequestWithRelayPrefix(data []byte) (
 	sid string, proxyType string, natType string, clients int, relayPrefix string, relayPrefixAware bool, err error) {
+
+	// log here
+	log.Print("Right before decoding inside DecodeProxy func!")
 	var message ProxyPollRequest
+	log.Print("knows what a proxyPollRequest is")
 
 	err = json.Unmarshal(data, &message)
+	log.Print("Unmarshal done")
 	if err != nil {
+		log.Print("Error in unmarshal")
 		return
 	}
 
 	majorVersion := strings.Split(message.Version, ".")[0]
+	log.Print("after split funciton")
 	if majorVersion != "1" {
+		log.Print("using unknown version")
 		err = fmt.Errorf("using unknown version")
 		return
 	}
 
 	// Version 1.x requires an Sid
 	if message.Sid == "" {
+		log.Print("error with supplied session id")
 		err = fmt.Errorf("no supplied session id")
 		return
 	}
@@ -155,10 +165,11 @@ func DecodeProxyPollRequestWithRelayPrefix(data []byte) (
 	case nat.NATRestricted:
 	case nat.NATUnrestricted:
 	default:
+		log.Print("error with NAT type unknown")
 		err = fmt.Errorf("invalid NAT type")
 		return
 	}
-
+	log.Print("NAT set")
 	// we don't reject polls with an unknown proxy type because we encourage
 	// projects that embed proxy code to include their own type
 	if !KnownProxyTypes[message.Type] {
@@ -168,6 +179,7 @@ func DecodeProxyPollRequestWithRelayPrefix(data []byte) (
 	if message.AcceptedRelayPattern != nil {
 		acceptedRelayPattern = *message.AcceptedRelayPattern
 	}
+	log.Printf("returning message")
 	return message.Sid, message.Type, message.NAT, message.Clients,
 		acceptedRelayPattern, message.AcceptedRelayPattern != nil, nil
 }
@@ -185,6 +197,7 @@ func EncodePollResponse(offer string, success bool, natType string) ([]byte, err
 }
 
 func EncodePollResponseWithRelayURL(offer string, success bool, natType, relayURL, failReason string) ([]byte, error) {
+	// print out the argements
 	if success {
 		return json.Marshal(ProxyPollResponse{
 			Status:   "client match",
