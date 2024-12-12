@@ -22,6 +22,7 @@ Pluggable Transport using WebRTC, inspired by Flashproxy.
 ### Structure of this Repository
 
 - `broker/` contains code for the Snowflake broker
+- `brokerserverless/` contains code for the serverless version of the Snowflake broker
 - `doc/` contains Snowflake documentation and manpages
 - `client/` contains the Tor pluggable transport client and client library code
 - `common/` contains generic libraries used by multiple pieces of Snowflake
